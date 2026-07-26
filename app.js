@@ -73,8 +73,15 @@ const L = {
   confirmWipe:'سيُحذف كل السجل نهائيًا. متأكد؟',
   rows:'صف', newSeg:'مقطع جديد', updSeg:'مقطع محدَّث', repTasks:'مهام مستقبلية ستُستبدل',
   keptTasks:'مهام مكتملة ستبقى', errRows:'صفوف غير صالحة', noUndo:'لا يوجد استيراد للتراجع عنه.',
-  dup:'معرّف مهمة مكرر داخل الملف', missSheet:'الورقة MonthlyPlan غير موجودة',
-  badSchema:'إصدار الصيغة غير مدعوم'},
+  dup:'معرّف مهمة مكرر داخل الملف', dupSeg:'معرّف مقطع مكرر',
+  missSheet:'ورقة مفقودة', missCol:'عمود مفقود',
+  badSchema:'إصدار الصيغة غير مدعوم', noSchema:'schema_version غير موجود في ورقة Settings',
+  badDate:'تاريخ غير صحيح', badStab:'الثبات يجب أن يكون ١–٥',
+  badRange:'النهاية قبل البداية', pageBounds:'رقم صفحة خارج المصحف',
+  badAyah:'رقم آية غير صحيح', needRange:'مطلوب نطاق صفحات أو آيات',
+  noSeg:'segment_id غير موجود في ورقة المحفوظ', noRows:'لا توجد مهام في الملف',
+  badFile:'الملف غير صالح أو تالف',
+  blocked:'لن يُستورد شيء حتى تُصحَّح كل الأخطاء.', copyErr:'نسخ الأخطاء'},
  en:{
   app:'Wird', appsub:'Memorisation & revision', today:'Today',
   'nav.day':'Today','nav.muh':'Audit','nav.inv':'Memorised','nav.set':'Settings',
@@ -325,60 +332,86 @@ function toIsoDate(v){
   const s=String(v).trim();
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
 }
+const REQ_PLAN = ['task_id','date','surah_name_ar','surah_number','start_ayah','end_ayah',
+  'start_page','end_page','task_type','priority','estimated_minutes','memorisation_status',
+  'stability_score','notes','source_month'];
+const REQ_INV = ['segment_id','surah_name_ar','surah_number','start_ayah','end_ayah','start_page',
+  'end_page','memorised_date','memorisation_status','stability_score','last_review_date',
+  'next_review_date','total_reviews','total_errors','consecutive_good_reviews','notes'];
+
+function headersOf(sheet){
+  const rows = XLSX.utils.sheet_to_json(sheet,{header:1,blankrows:false});
+  return (rows[0]||[]).map(h=>String(h||'').trim());
+}
+function realDate(s){
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y,m,d] = s.split('-').map(Number);
+  const dt = new Date(y, m-1, d);
+  return dt.getFullYear()===y && dt.getMonth()===m-1 && dt.getDate()===d;
+}
+
+/* Returns {settings,tasks,segs,errors,fatal}. A non-empty errors array blocks
+   the whole import — see applyImport's guard. Nothing is written here.      */
 function parseWorkbook(buf){
-  const wb = XLSX.read(buf,{type:'array',cellDates:true});
-  if(!wb.Sheets['MonthlyPlan']) throw new Error(t('missSheet'));
+  const errors = [];
+  const fail = (where,msg)=>{ errors.push({row:where, id:'—', msg}); };
+  let wb;
+  try{ wb = XLSX.read(buf,{type:'array',cellDates:true}); }
+  catch(e){ return {settings:{},tasks:[],segs:[],errors:[{row:'—',id:'—',msg:t('badFile')}],fatal:true}; }
+
+  // ── structure ──────────────────────────────────────────────────────────
+  ['MonthlyPlan','MemorisationInventory','Settings'].forEach(n=>{
+    if(!wb.Sheets[n]) fail('—', t('missSheet')+': '+n);
+  });
+  if(errors.length) return {settings:{},tasks:[],segs:[],errors,fatal:true};
+
+  const planH = headersOf(wb.Sheets['MonthlyPlan']);
+  const invH  = headersOf(wb.Sheets['MemorisationInventory']);
+  REQ_PLAN.forEach(c=>{ if(!planH.includes(c)) fail('MonthlyPlan', t('missCol')+': '+c); });
+  REQ_INV .forEach(c=>{ if(!invH.includes(c))  fail('MemorisationInventory', t('missCol')+': '+c); });
 
   const settings = {};
-  if(wb.Sheets['Settings'])
-    XLSX.utils.sheet_to_json(wb.Sheets['Settings']).forEach(r=>{
-      const k=cell(r,'key'), v=cell(r,'value'); if(k!=='') settings[k]=v; });
+  XLSX.utils.sheet_to_json(wb.Sheets['Settings']).forEach(r=>{
+    const k=cell(r,'key'), v=cell(r,'value'); if(k!=='') settings[k]=v; });
+  const sv = String(settings.schema_version||'').trim();
+  if(!sv) fail('Settings', t('noSchema'));
+  else if(sv !== SCHEMA) fail('Settings', `${t('badSchema')}: ${sv} \u2260 ${SCHEMA}`);
 
-  const rawPlan = XLSX.utils.sheet_to_json(wb.Sheets['MonthlyPlan'],{defval:''});
-  const rawInv  = wb.Sheets['MemorisationInventory']
-    ? XLSX.utils.sheet_to_json(wb.Sheets['MemorisationInventory'],{defval:''}) : [];
+  if(errors.length) return {settings,tasks:[],segs:[],errors,fatal:true};
 
-  const errors=[], seen=new Set(), tasks=[];
-  rawPlan.forEach((r,i)=>{
+  // ── inventory ──────────────────────────────────────────────────────────
+  const maxPage = Number(settings.mushaf_pages)||604;
+  const segs=[], segIds=new Set();
+  XLSX.utils.sheet_to_json(wb.Sheets['MemorisationInventory'],{defval:''}).forEach((r,i)=>{
     const row=i+2, e=[];
-    const id = String(cell(r,'task_id')).trim();
-    const date = toIsoDate(cell(r,'date'));
-    const type = String(cell(r,'task_type')).trim().toUpperCase();
-    const pr = Number(cell(r,'priority'));
-    if(!id) e.push('task_id');
-    else if(seen.has(id)) e.push(t('dup'));
-    if(!date) e.push('date');
-    if(!TASK_TYPES.includes(type)) e.push('task_type');
-    if(!(pr>=1&&pr<=5)) e.push('priority');
-    const sa=Number(cell(r,'start_ayah'))||0, ea=Number(cell(r,'end_ayah'))||0;
+    const id=String(cell(r,'segment_id')).trim();
+    if(!id){ e.push('segment_id'); }
+    else if(segIds.has(id)) e.push(t('dupSeg'));
+    const st=String(cell(r,'memorisation_status')).trim().toUpperCase();
+    if(!STATUSES.includes(st)) e.push('memorisation_status');
+    const sc=Number(cell(r,'stability_score'));
+    if(!(sc>=1 && sc<=5)) e.push(t('badStab'));
     const sp=Number(cell(r,'start_page'))||0, ep=Number(cell(r,'end_page'))||0;
-    if(!sa && !sp && type!=='TEST') e.push('ayah/page');   // TEST pages are chosen at execution
-    const st = String(cell(r,'memorisation_status')).trim().toUpperCase();
-    if(st && !STATUSES.includes(st)) e.push('memorisation_status');
-    if(e.length){ errors.push({row, id:id||'—', msg:e.join(', ')}); return; }
-    seen.add(id);
-    tasks.push({task_id:id, date, scheduled_date:date,
-      surah_name_ar:String(cell(r,'surah_name_ar')), surah_number:Number(cell(r,'surah_number'))||0,
-      start_ayah:sa, end_ayah:ea, start_page:sp, end_page:ep,
-      task_type:type, priority:pr,
-      estimated_minutes:Number(cell(r,'estimated_minutes'))||0,
-      memorisation_status:st||'NEW',
-      stability_score:Number(cell(r,'stability_score'))||0,
-      notes:String(cell(r,'notes')), source_month:String(cell(r,'source_month')),
-      segment_id:String(cell(r,'segment_id')||'').trim()||'',
-      state:'pending'});
-  });
-
-  const segs=[];
-  rawInv.forEach((r,i)=>{
-    const id=String(cell(r,'segment_id')).trim(); if(!id) return;
+    const sa=Number(cell(r,'start_ayah'))||0, ea=Number(cell(r,'end_ayah'))||0;
+    if(sp||ep){
+      if(sp<1||sp>maxPage||ep<1||ep>maxPage) e.push(t('pageBounds'));
+      else if(ep<sp) e.push(t('badRange')+' (page)');
+    }
+    if(sa||ea){
+      if(sa<1||ea<1) e.push(t('badAyah'));
+      else if(ea<sa) e.push(t('badRange')+' (ayah)');
+    }
+    ['memorised_date','last_review_date','next_review_date'].forEach(k=>{
+      const v=toIsoDate(cell(r,k));
+      if(cell(r,k)!=='' && !v) e.push(k);
+    });
+    if(e.length){ errors.push({row:'Inv '+row, id:id||'\u2014', msg:e.join(', ')}); return; }
+    segIds.add(id);
     segs.push({segment_id:id,
       surah_name_ar:String(cell(r,'surah_name_ar')), surah_number:Number(cell(r,'surah_number'))||0,
-      start_ayah:Number(cell(r,'start_ayah'))||0, end_ayah:Number(cell(r,'end_ayah'))||0,
-      start_page:Number(cell(r,'start_page'))||0, end_page:Number(cell(r,'end_page'))||0,
+      start_ayah:sa, end_ayah:ea, start_page:sp, end_page:ep,
       memorised_date:toIsoDate(cell(r,'memorised_date')),
-      memorisation_status:String(cell(r,'memorisation_status')).trim().toUpperCase()||'NEW',
-      stability_score:Number(cell(r,'stability_score'))||3,
+      memorisation_status:st, stability_score:sc,
       last_review_date:toIsoDate(cell(r,'last_review_date')),
       next_review_date:toIsoDate(cell(r,'next_review_date')),
       total_reviews:Number(cell(r,'total_reviews'))||0,
@@ -386,9 +419,68 @@ function parseWorkbook(buf){
       consecutive_good_reviews:Number(cell(r,'consecutive_good_reviews'))||0,
       notes:String(cell(r,'notes'))});
   });
-  return {settings, tasks, segs, errors};
+
+  // ── plan ───────────────────────────────────────────────────────────────
+  const seen=new Set(), tasks=[];
+  XLSX.utils.sheet_to_json(wb.Sheets['MonthlyPlan'],{defval:''}).forEach((r,i)=>{
+    const row=i+2, e=[];
+    const id = String(cell(r,'task_id')).trim();
+    if(!id) e.push('task_id');
+    else if(seen.has(id)) e.push(t('dup'));
+
+    const rawDate = cell(r,'date');
+    const date = toIsoDate(rawDate);
+    if(!date || !realDate(date)) e.push(t('badDate'));
+
+    const type = String(cell(r,'task_type')).trim().toUpperCase();
+    if(!TASK_TYPES.includes(type)) e.push('task_type');
+
+    const pr = Number(cell(r,'priority'));
+    if(!(pr>=1 && pr<=5)) e.push('priority');
+
+    const sc = Number(cell(r,'stability_score'));
+    if(cell(r,'stability_score')!=='' && !(sc>=1 && sc<=5)) e.push(t('badStab'));
+
+    const em = Number(cell(r,'estimated_minutes'));
+    if(cell(r,'estimated_minutes')!=='' && !(em>=0)) e.push('estimated_minutes');
+
+    const sa=Number(cell(r,'start_ayah'))||0, ea=Number(cell(r,'end_ayah'))||0;
+    const sp=Number(cell(r,'start_page'))||0, ep=Number(cell(r,'end_page'))||0;
+    const dynamic = (type==='TEST' || type==='CORRECTION');
+    if(!sa && !sp && !dynamic) e.push(t('needRange'));
+    if(sp||ep){
+      if(sp<1||sp>maxPage||ep<1||ep>maxPage) e.push(t('pageBounds'));
+      else if(ep<sp) e.push(t('badRange')+' (page)');
+    }
+    if(sa||ea){
+      if(sa<1||ea<1) e.push(t('badAyah'));
+      else if(ea<sa) e.push(t('badRange')+' (ayah)');
+    }
+
+    const st = String(cell(r,'memorisation_status')).trim().toUpperCase();
+    if(st && !STATUSES.includes(st)) e.push('memorisation_status');
+
+    // segment_id is optional in schema 1.0, but must resolve when supplied
+    const sid = String(cell(r,'segment_id')||'').trim();
+    if(sid && !segIds.has(sid)) e.push(t('noSeg')+': '+sid);
+
+    if(e.length){ errors.push({row:'Plan '+row, id:id||'\u2014', msg:e.join(', ')}); return; }
+    seen.add(id);
+    tasks.push({task_id:id, date, scheduled_date:date,
+      surah_name_ar:String(cell(r,'surah_name_ar')), surah_number:Number(cell(r,'surah_number'))||0,
+      start_ayah:sa, end_ayah:ea, start_page:sp, end_page:ep,
+      task_type:type, priority:pr, estimated_minutes:em||0,
+      memorisation_status:st||'NEW', stability_score:sc||0,
+      notes:String(cell(r,'notes')), source_month:String(cell(r,'source_month')),
+      segment_id:sid, state:'pending'});
+  });
+
+  if(!tasks.length && !errors.length) fail('MonthlyPlan', t('noRows'));
+  return {settings, tasks, segs, errors, fatal:false};
 }
+
 function applyImport(P){
+  if(!P || P.errors.length || !P.tasks.length) return false;   // atomic: all or nothing
   DB.undo = JSON.parse(JSON.stringify({tasks:DB.tasks, inventory:DB.inventory,
                                        settings:DB.settings, lastImport:DB.lastImport}));
   const today = TODAY();
@@ -419,6 +511,7 @@ function applyImport(P){
   DB.lastImport = {at:new Date().toISOString(), month:DB.settings.plan_month||'',
                    tasks:P.tasks.length, segs:P.segs.length};
   save(); normalise();
+  return true;
 }
 
 /* ═══════════ EXPORT (§13, §15) ═══════════ */
@@ -546,7 +639,7 @@ function applyLang(){
   set('#mkAdd','add'); set('#fixL','fix'); set('#repL','rep'); set('#memL','mem'); set('#scL','score');
   set('#minL','mins'); set('#nxtL','next'); set('#ntL','notes'); set('#tdSave','complete');
   set('#tdLater','postpone'); set('#tdSkip','skip'); set('#tdCancel','close');
-  set('#pvTitle','pvTitle'); set('#pvOk','pvOk'); set('#pvCancel','cancel');
+  set('#pvTitle','pvTitle'); set('#pvOk','pvOk'); set('#pvCancel','cancel'); set('#pvCopy','copyErr');
   const rd=$('#sRest'); rd.innerHTML = (AR()?DAYS_AR:DAYS_EN)
     .map((n,i)=>`<option value="${DAYS_EN[i]}">${n}</option>`).join('');
   rd.value = DB.settings.rest_day;
@@ -830,7 +923,7 @@ $$('nav button').forEach(b=>b.onclick=()=>{
 });
 
 /* import */
-let pending=null;
+let pending=null, lastErrors=[];
 $('#impBtn').onclick=()=>$('#impFile').click();
 $('#impFile').onchange=e=>{
   const f=e.target.files[0]; if(!f) return;
@@ -850,16 +943,26 @@ $('#impFile').onchange=e=>{
           <tr><th>${t('keptTasks')}</th><td>${kept}</td></tr>
           <tr><th>${t('errRows')}</th><td class="${P.errors.length?'err':''}">${P.errors.length}</td></tr>
         </table>
+        ${P.errors.length?`<div class="hint err" style="margin-top:9px">${t('blocked')}</div>`:''}
         ${P.errors.length?`<table class="prev"><tr><th>#</th><th>task_id</th><th>${t('errRows')}</th></tr>
-          ${P.errors.slice(0,25).map(x=>`<tr><td>${x.row}</td><td>${x.id}</td><td class="err">${x.msg}</td></tr>`).join('')}
+          ${P.errors.slice(0,40).map(x=>`<tr><td>${x.row}</td><td>${x.id}</td><td class="err">${x.msg}</td></tr>`).join('')}
         </table>`:''}`;
-      $('#pvOk').disabled = P.tasks.length===0;
+      lastErrors = P.errors;
+      $('#pvOk').disabled = P.errors.length>0 || P.tasks.length===0;
+      $('#pvCopy').style.display = P.errors.length ? 'block' : 'none';
       $('#prevDlg').showModal();
     }catch(err){ toast(err.message||'Invalid file'); } };
   r.readAsArrayBuffer(f); e.target.value='';
 };
-$('#pvOk').onclick=()=>{ if(!pending) return; applyImport(pending); pending=null;
-  $('#prevDlg').close(); renderAll(); toast(t('imported')); };
+$('#pvOk').onclick=()=>{
+  if(!pending) return;
+  if(!applyImport(pending)){ toast(t('blocked')); return; }   // atomic guard
+  pending=null; $('#prevDlg').close(); renderAll(); toast(t('imported'));
+};
+$('#pvCopy').onclick=()=>{
+  const txt = lastErrors.map(x=>`${x.row} | ${x.id} | ${x.msg}`).join('\n');
+  navigator.clipboard?.writeText(txt).then(()=>toast(t('saved')),()=>{});
+};
 $('#pvCancel').onclick=()=>{ pending=null; $('#prevDlg').close(); };
 $('#undoImp').onclick=()=>{
   if(!DB.undo){ toast(t('noUndo')); return; }
