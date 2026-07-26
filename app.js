@@ -32,17 +32,18 @@ const L = {
   'nav.day':'اليوم','nav.muh':'المحاسبة','nav.inv':'المحفوظ','nav.set':'الإعدادات',
   tasksN:'مهمة', minutes:'دقيقة', target:'المستهدف', expected:'المتوقع', doneN:'مكتملة',
   sec:{rescue:'مراجعة الإنقاذ', newmem:'الحفظ الجديد', recent:'المراجعة القريبة',
-       old:'المراجعة القديمة', test:'الاختبار والتسميع', deferred:'مؤجَّل لضيق الوقت'},
+       old:'المراجعة القديمة', test:'الاختبار والتسميع', missed:'فائت — بتاريخه الأصلي'},
   types:{NEW_MEMORISATION:'حفظ جديد', SAME_DAY_REVIEW:'مراجعة حفظ اليوم', RECENT_REVIEW:'مراجعة حديثة',
     RESCUE_REVIEW:'إنقاذ مقطع متفلت', OLD_REVIEW:'مراجعة قديمة', TEST:'اختبار غيبًا',
     CORRECTION:'تصحيح بالمصحف', LISTENING:'استماع', CONSOLIDATION:'ربط ووصل'},
   stat:{NEW:'حفظ جديد', FRAGILE:'بدأ يتفلت', WEAK:'ضعيف', STABLE:'ثابت',
         STRONG:'راسخ', PAUSED:'متوقف', NOT_MEMORISED:'غير محفوظ'},
-  why:{sched:'مجدولة اليوم', missed:'فائتة من', moved:'أُعيد توزيعها من',
+  why:{sched:'مجدولة اليوم', missed:'فائتة من', postponed:'أجّلتها من',
        due:'مراجعة متباعدة مستحقة', over:'تجاوزت وقت اليوم'},
   ayat:'آية', pages:'صفحة', start:'ابدأ', later:'تأجيل', done:'تم',
   noTasks:'لا مهام اليوم.\nاستورد خطة الشهر من الإعدادات.',
   restDay:'يوم راحة — لا مراجعة مجدولة.',
+  missedHint:'باقية على تاريخها في الجدول ولا تُضاف إلى حمل اليوم. أكملها متأخرًا أو تجاوزها.',
   muhTitle:'المحاسبة اليومية', all:'الكل', jadwal:'جدول الشهر',
   invAll:'الكل', invSummary:'ملخص الشهر',
   fDone:'مهام مكتملة', fMissed:'مهام فائتة', fMin:'دقائق المراجعة', fMemMin:'دقائق الحفظ',
@@ -59,7 +60,7 @@ const L = {
   s7:'التقويم الهجري', s8:'تعديل الهجري (يوم)',
   cals:{'islamic-umalqura':'أم القرى', 'islamic':'الفلكي المعدّل',
         'islamic-civil':'الحسابي المدني', 'islamic-tbla':'الحسابي (فلكي)'},
-  setHint:'قواعد المراجعة تُستخدم لحساب الموعد القادم بعد كل تقييم. التقويم الهجري تقديري — عدّله بيوم إن خالف الرؤية عندك.',
+  setHint:'الجدول المستورد هو المرجع؛ التطبيق لا يعيد توزيع المهام. الفواصل أدناه تُحسب وتُصدَّر لبناء جدول الشهر القادم فقط. التقويم الهجري تقديري — عدّله بيوم إن خالف الرؤية عندك.',
   wipe:'حذف كل البيانات',
   ph1:'المرحلة ١ — التسميع غيبًا', ph2:'المرحلة ٢ — التصحيح بالمصحف',
   cErr:'الأخطاء', cPr:'التوقفات / المساعدة', mk:'علّم موضع خطأ (صفحة أو آية)', add:'إضافة',
@@ -85,11 +86,12 @@ const L = {
     CORRECTION:'Correction with mushaf', LISTENING:'Listening', CONSOLIDATION:'Consolidation'},
   stat:{NEW:'New', FRAGILE:'Slipping', WEAK:'Weak', STABLE:'Stable',
         STRONG:'Solid', PAUSED:'Paused', NOT_MEMORISED:'Not memorised'},
-  why:{sched:'Scheduled today', missed:'Missed from', moved:'Redistributed from',
+  why:{sched:'Scheduled today', missed:'Missed from', postponed:'You postponed from',
        due:'Spaced review due', over:'Over today\u2019s budget'},
   ayat:'ayah', pages:'page', start:'Start', later:'Postpone', done:'Done',
   noTasks:'No tasks today.\nImport the monthly plan from Settings.',
   restDay:'Rest day \u2014 no revision scheduled.',
+  missedHint:'Left on their workbook date and not added to today\u2019s load. Complete late or skip.',
   muhTitle:'Daily audit', all:'All', jadwal:'Month grid',
   invAll:'All', invSummary:'Month summary',
   fDone:'Tasks completed', fMissed:'Tasks missed', fMin:'Revision minutes', fMemMin:'Memorisation minutes',
@@ -106,7 +108,7 @@ const L = {
   s7:'Hijri calendar', s8:'Hijri adjustment (days)',
   cals:{'islamic-umalqura':'Umm al-Qura', 'islamic':'Astronomical (adjusted)',
         'islamic-civil':'Tabular (civil)', 'islamic-tbla':'Tabular (astronomical)'},
-  setHint:'The review rules compute the next date after each rating. Hijri dates are calculated \u2014 nudge by a day if local sighting differs.',
+  setHint:'The imported workbook is authoritative; the app never redistributes. The intervals below are computed and exported to build next month\u2019s plan only. Hijri dates are calculated \u2014 nudge by a day if local sighting differs.',
   wipe:'Erase all data',
   ph1:'Phase 1 \u2014 recite from memory', ph2:'Phase 2 \u2014 correct with the mushaf',
   cErr:'Mistakes', cPr:'Stops / prompts', mk:'Mark an error spot (page or ayah)', add:'Add',
@@ -270,53 +272,16 @@ function minutesOf(tk){
 }
 function isMemTrack(tk){ return tk.task_type==='NEW_MEMORISATION' || tk.task_type==='SAME_DAY_REVIEW'; }
 
-/* Runs once on load and after any change. Never doubles a day's load. */
+/* The workbook is the schedule. This only labels state — it never moves,
+   defers, redistributes or adds a task. A day's contents always equal the
+   imported rows for that date.                                            */
 function normalise(){
   const today = TODAY();
-  const budgetRev = Number(DB.settings.daily_review_minutes)||30;
-  const budgetMem = Number(DB.settings.daily_memorisation_minutes)||30;
-
-  // 1. everything overdue is recorded as missed and lifted off the calendar
-  const overdue = Object.values(DB.tasks)
-    .filter(x => x.state==='pending' && (x.scheduled_date||x.date) < today)
-    .sort((a,b)=> (a.priority-b.priority) || (rank(a)-rank(b)));
-  overdue.forEach(x=>{
-    if(!x.missed_from) x.missed_from = x.scheduled_date || x.date;
-    x.missed_count = (x.missed_count||0) + (x.last_roll===today ? 0 : 1);
-    x.last_roll = today;
-    x.scheduled_date = null;
-  });
-
-  // 2. re-place them earliest-first, but never past a day's remaining capacity.
-  //    Priority order means high-priority work lands today; the rest cascades
-  //    forward instead of piling onto one day (§8).
-  const loadOn = (d,mem)=> Object.values(DB.tasks)
-      .filter(x=>x.state==='pending' && x.scheduled_date===d && isMemTrack(x)===mem)
-      .reduce((s,x)=>s+minutesOf(x),0);
-
-  overdue.forEach(x=>{
-    const mem = isMemTrack(x), cap = mem?budgetMem:budgetRev, need = minutesOf(x);
-    let d = today, guard = 0;
-    while(guard++ < 180){
-      if(!isRestDay(d) && loadOn(d,mem) + need <= cap){ break; }
-      d = addDays(d,1);
-    }
-    x.scheduled_date = d;
-    if(d === today) delete x.moved_from;          // resurfaced — shown as missed
-    else x.moved_from = x.missed_from;            // pushed out — shown as redistributed
-  });
-
-  // 3. today's over-budget tail slides to the next day (lowest priority first) — §2c
-  [true,false].forEach(mem=>{
-    const cap = mem?budgetMem:budgetRev;
-    let list = Object.values(DB.tasks)
-      .filter(x=>x.state==='pending' && x.scheduled_date===today && isMemTrack(x)===mem)
-      .sort((a,b)=> (a.priority-b.priority) || (rank(a)-rank(b)));
-    let used=0;
-    list.forEach(x=>{
-      used += minutesOf(x);
-      x.over_budget = used > cap && x.priority > 1;      // priority 1 is never pushed
-    });
+  Object.values(DB.tasks).forEach(x=>{
+    delete x.over_budget; delete x.moved_from;      // retired concepts
+    if(!x.scheduled_date) x.scheduled_date = x.date;
+    x.missed = x.state==='pending' && x.scheduled_date < today;
+    if(x.missed && !x.missed_from) x.missed_from = x.scheduled_date;
   });
   save();
 }
@@ -328,10 +293,22 @@ function dayTasks(dateStr){
     .filter(x => (x.scheduled_date||x.date) === dateStr)
     .sort((a,b)=> (a.priority-b.priority) || (rank(a)-rank(b)));
 }
+/* The ONLY code path that changes a task's date. User-initiated, one day at a
+   time, from the تأجيل button. Nothing automatic ever calls this.          */
+function postpone(x){
+  if(!x.postponed_from) x.postponed_from = x.scheduled_date || x.date;
+  x.scheduled_date = addDays(x.scheduled_date || x.date, 1);
+  x.postponed_count = (x.postponed_count||0) + 1;
+}
+
+/* Missed work is surfaced on its own, never folded into another day. */
+function missedTasks(){
+  return Object.values(DB.tasks).filter(x=>x.missed)
+    .sort((a,b)=> a.scheduled_date < b.scheduled_date ? 1 : -1);
+}
 function whyShown(x){
-  if(x.missed_from && x.scheduled_date===TODAY() && x.priority<=2)
-    return t('why').missed + ' ' + x.missed_from;
-  if(x.moved_from) return t('why').moved + ' ' + x.moved_from;
+  if(x.missed) return t('why').missed + ' ' + x.missed_from;
+  if(x.postponed_from) return t('why').postponed + ' ' + x.postponed_from;
   return t('why').sched;
 }
 function rangeText(x){
@@ -375,7 +352,7 @@ function parseWorkbook(buf){
     if(!(pr>=1&&pr<=5)) e.push('priority');
     const sa=Number(cell(r,'start_ayah'))||0, ea=Number(cell(r,'end_ayah'))||0;
     const sp=Number(cell(r,'start_page'))||0, ep=Number(cell(r,'end_page'))||0;
-    if(!sa && !sp) e.push('ayah/page');
+    if(!sa && !sp && type!=='TEST') e.push('ayah/page');   // TEST pages are chosen at execution
     const st = String(cell(r,'memorisation_status')).trim().toUpperCase();
     if(st && !STATUSES.includes(st)) e.push('memorisation_status');
     if(e.length){ errors.push({row, id:id||'—', msg:e.join(', ')}); return; }
@@ -466,10 +443,11 @@ function exportMonthly(){
     s.consecutive_good_reviews,s.notes]));
   XLSX.utils.book_append_sheet(wb, aoa(invRows), 'MemorisationInventory');
 
-  const missRows=[['task_id','date','surah_name_ar','task_type','priority','missed_count','current_state']];
-  Object.values(DB.tasks).filter(x=>x.missed_count>0 || x.state==='skipped')
+  const missRows=[['task_id','workbook_date','surah_name_ar','task_type','priority',
+    'current_date','postponed_count','current_state']];
+  Object.values(DB.tasks).filter(x=>x.missed || x.state==='skipped' || x.postponed_count)
     .forEach(x=>missRows.push([x.task_id,x.date,x.surah_name_ar,x.task_type,x.priority,
-      x.missed_count||0,x.state]));
+      x.scheduled_date||x.date,x.postponed_count||0,x.missed?'MISSED':x.state]));
   XLSX.utils.book_append_sheet(wb, aoa(missRows), 'MissedTasks');
 
   const weakRows=[['segment_id','surah_name_ar','memorisation_status','stability_score',
@@ -592,14 +570,14 @@ function renderDate(){
 function renderDay(){
   const list = dayTasks(cur);
   const rev = list.filter(x=>!isMemTrack(x)), mem = list.filter(x=>isMemTrack(x));
-  const est = list.filter(x=>x.state==='pending'&&!x.over_budget).reduce((s,x)=>s+minutesOf(x),0);
+  const est = list.reduce((s,x)=>s+minutesOf(x),0);
   const done = list.filter(x=>x.state==='done').length;
   const pct = list.length? Math.round(done/list.length*100):0;
   $('#dayHead').innerHTML = `
     <div class="kpi">
       <div><div class="n">${list.length}</div><div class="u">${t('tasksN')}</div></div>
       <div><div class="n">${est}</div><div class="u">${t('expected')} ${t('minutes')}</div></div>
-      <div><div class="n">${DB.settings.daily_review_minutes}+${DB.settings.daily_memorisation_minutes}</div>
+      <div><div class="n">${DB.settings.daily_review_minutes}</div>
         <div class="u">${t('target')}</div></div>
       <div style="margin-inline-start:auto;text-align:end"><div class="n">${done}/${list.length}</div>
         <div class="u">${t('doneN')}</div></div>
@@ -612,18 +590,22 @@ function renderDay(){
   }
   let html='';
   SECTION_ORDER.forEach(sec=>{
-    const items = list.filter(x=>(SECTION_OF[x.task_type]||'recent')===sec && !x.over_budget);
+    const items = list.filter(x=>(SECTION_OF[x.task_type]||'recent')===sec);
     if(!items.length) return;
     html += `<div class="sect ${sec}"><div class="hd"><span class="dot"></span>${t('sec')[sec]}
       <span style="margin-inline-start:auto;font-weight:400">${items.reduce((s,x)=>s+minutesOf(x),0)} ${t('minutes')}</span></div>`;
     items.forEach(x=>html+=taskCard(x,sec));
     html += `</div>`;
   });
-  const over = list.filter(x=>x.over_budget && x.state==='pending');
-  if(over.length){
-    html += `<div class="sect deferred"><div class="hd"><span class="dot"></span>${t('sec').deferred}</div>`;
-    over.forEach(x=>html+=taskCard(x,'deferred'));
-    html += `</div>`;
+  if(cur===TODAY()){
+    const miss = missedTasks();
+    if(miss.length){
+      html += `<div class="sect deferred"><div class="hd"><span class="dot"></span>${t('sec').missed}
+        <span style="margin-inline-start:auto;font-weight:400">${miss.length}</span></div>
+        <div class="hint" style="margin:0 3px 8px">${t('missedHint')}</div>`;
+      miss.slice(0,12).forEach(x=>html+=taskCard(x,'deferred'));
+      html += `</div>`;
+    }
   }
   $('#dayTasks').innerHTML = html;
 }
@@ -802,8 +784,7 @@ $('#dayTasks').addEventListener('click',e=>{
   const o=e.target.closest('[data-open]'), l=e.target.closest('[data-later]'), q=e.target.closest('[data-quick]');
   if(o) openTask(o.dataset.open);
   else if(l){ const x=DB.tasks[l.dataset.later];
-    x.scheduled_date=addDays(x.scheduled_date||x.date,1); x.moved_from=x.moved_from||cur;
-    save(); normalise(); renderAll(); }
+    postpone(x); save(); normalise(); renderAll(); }
   else if(q){ openTask(q.dataset.quick); }
 });
 $('#taskDlg').addEventListener('click',e=>{
@@ -820,8 +801,7 @@ $('#mkAdd').onclick=()=>{ const v=$('#mkIn').value.trim(); if(!v) return;
 $('#tdMin').onchange=e=>draft.minutes=e.target.value;
 $('#tdNote').onchange=e=>draft.notes=e.target.value;
 $('#tdSave').onclick=completeTask;
-$('#tdLater').onclick=()=>{ const x=activeTask;
-  x.scheduled_date=addDays(x.scheduled_date||x.date,1); x.moved_from=x.moved_from||cur;
+$('#tdLater').onclick=()=>{ postpone(activeTask);
   save(); normalise(); $('#taskDlg').close(); renderAll(); };
 $('#tdSkip').onclick=()=>{ activeTask.state='skipped'; save(); $('#taskDlg').close(); renderAll(); };
 $('#tdCancel').onclick=()=>$('#taskDlg').close();
